@@ -1,52 +1,59 @@
 const fs = require('fs');
 const path = require('path');
-const { query, connectDB, closePool } = require('../connection');
+const { pool } = require('../connection');
 const logger = require('../../utils/logger');
 
-const runMigrations = async () => {
+const migrate = async () => {
+  const client = await pool.connect();
+  
   try {
-    logger.info('Starting database migrations...');
+    logger.info('Starting database migration...');
     
-    // Connect to database
-    await connectDB();
-    
-    // Read and execute schema file
+    // Read the schema file
     const schemaPath = path.join(__dirname, '..', 'schema.sql');
     const schema = fs.readFileSync(schemaPath, 'utf8');
     
-    // Split by semicolon and execute each statement
-    const statements = schema.split(';').filter(stmt => stmt.trim().length > 0);
+    // Execute the schema
+    await client.query(schema);
     
-    for (let i = 0; i < statements.length; i++) {
-      const statement = statements[i].trim();
-      if (statement) {
-        try {
-          await query(statement);
-          logger.info(`Executed migration statement ${i + 1}/${statements.length}`);
-        } catch (error) {
-          // Skip if table/extension already exists
-          if (error.code === '42P07' || error.code === '58P01') {
-            logger.info(`Skipping existing object in statement ${i + 1}`);
-            continue;
-          }
-          throw error;
-        }
-      }
-    }
+    logger.info('Database migration completed successfully');
     
-    logger.info('Database migrations completed successfully!');
+    // Create migration record
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS migrations (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        executed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    await client.query(`
+      INSERT INTO migrations (name) 
+      VALUES ('initial_schema') 
+      ON CONFLICT DO NOTHING
+    `);
+    
+    logger.info('Migration record created');
     
   } catch (error) {
     logger.error('Migration failed:', error);
-    process.exit(1);
+    throw error;
   } finally {
-    await closePool();
+    client.release();
   }
 };
 
-// Run migrations if called directly
+// Run migration if called directly
 if (require.main === module) {
-  runMigrations();
+  migrate()
+    .then(() => {
+      logger.info('Migration completed');
+      process.exit(0);
+    })
+    .catch((error) => {
+      logger.error('Migration failed:', error);
+      process.exit(1);
+    });
 }
 
-module.exports = { runMigrations };
+module.exports = { migrate };
